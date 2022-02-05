@@ -666,8 +666,8 @@ The end result of this question should be a table formatted like this:
 | NASHVILLE   | 2043    | 6119     | 88669       | 13572    | 62859     | 1261        |
 
 For this question, you should look into use the crosstab function, which is part of the tablefunc extension 
-(https://www.postgresql.org/docs/9.5/tablefunc.html). In order to use this function, you must (one time per database) run the command
-CREATE EXTENSION tablefunc;
+(https://www.postgresql.org/docs/9.5/tablefunc.html). In order to use this function, you must (one time per database) 
+run the command CREATE EXTENSION tablefunc;
 
 Hint #1: First write a query which will label each drug in the drug table using the six categories listed above.
 */ 
@@ -675,6 +675,7 @@ Hint #1: First write a query which will label each drug in the drug table using 
 
 SELECT 
 	drug_name,
+	generic_name,
 	new_name
 FROM
 	(
@@ -689,15 +690,14 @@ FROM
 			WHEN generic_name ILIKE '%OXYMORPHONE%' THEN 'oxymorphone'
 			END AS new_name
 		FROM drug
-		WHERE opioid_drug_flag = 'Y'
 	) AS sq
 WHERE new_name IS NOT NULL;
 
 
 /* 
-Hint #2: In order to use the crosstab function, you need to first write a query which will produce a table with one row_name column,
-one category column, and one value column. So in this case, you need to have a city column, a drug label column, and
-a total claim count column.
+Hint #2: In order to use the crosstab function, you need to first write a query which will produce a table with 
+one row_name column, one category column, and one value column. So in this case, you need to have a city column, 
+a drug label column, and a total claim count column.
 */
 WITH new_drug_names AS (
 	SELECT 
@@ -715,7 +715,6 @@ WITH new_drug_names AS (
 				WHEN generic_name ILIKE '%OXYMORPHONE%' THEN 'oxymorphone'
 				END AS new_name
 			FROM drug
-			WHERE opioid_drug_flag = 'Y'
 		) AS sq
 	WHERE new_name IS NOT NULL
 )
@@ -736,11 +735,10 @@ WHERE nppes_provider_city IN ('NASHVILLE',
 GROUP BY nppes_provider_city, new_name
 ORDER BY nppes_provider_city, new_name;
 
---Need to understand why Morphine is different.
-
 /* 
 Hint #3: The sql statement that goes inside of crosstab must be surrounded by single quotes.
-If the query that you are using also uses single quotes, you'll need to escape them by turning them into double-single quotes.
+If the query that you are using also uses single quotes, you'll need to escape them by turning them 
+into double-single quotes.
 */
 
 SELECT *
@@ -770,7 +768,6 @@ INNER JOIN
 				WHEN generic_name ILIKE ''%OXYMORPHONE%'' THEN ''oxymorphone''
 				END AS new_name
 			FROM drug
-			WHERE opioid_drug_flag = ''Y''
 		) AS sq
 	WHERE new_name IS NOT NULL
 ) AS new_drug_names
@@ -792,5 +789,206 @@ AS ct (
 );
 
 
+----------------------------------------------------------------------------------------------------------------
+--Testing for additional exploration.
+--Question 1 Query
 
+WITH correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+)
+
+SELECT county, ROUND(SUM(total_claim_count)/population, 2) AS proportion_opioid_prescriptions
+FROM drug
+RIGHT JOIN prescription
+USING (drug_name)
+INNER JOIN applicable_npis
+USING (npi)
+WHERE opioid_drug_flag = 'Y'
+GROUP BY county, population
+ORDER BY proportion_opioid_prescriptions DESC;
+
+--Question 2 Query
+
+SELECT 
+	INITCAP(nppes_provider_first_name) AS first_name,
+	COALESCE(nppes_provider_mi,'') AS mi,
+	INITCAP(nppes_provider_last_org_name) AS last_name, 
+	COALESCE(nppes_credentials,'') AS credentials,
+	SUM(total_claim_count) AS total_prescriptions
+FROM drug
+INNER JOIN prescription
+USING (drug_name)
+INNER JOIN prescriber
+USING (npi)
+WHERE opioid_drug_flag = 'Y'
+AND nppes_provider_state = 'TN'
+GROUP BY
+	nppes_provider_first_name,
+	nppes_provider_mi,
+	nppes_provider_last_org_name, 
+	nppes_credentials
+ORDER BY total_prescriptions DESC;
+
+--Question 3 Query
+
+SELECT year, sum(overdose_deaths) AS deaths
+FROM overdose_deaths
+WHERE year BETWEEN 2015 AND 2018
+GROUP BY year
+ORDER BY year;
+
+--Question 4 Query
+
+WITH correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+),
+proportional_query AS (
+	SELECT 
+		county, 
+		ROUND(SUM(total_claim_count)/population, 2) AS proportion_opioid_prescriptions
+	FROM drug
+	RIGHT JOIN prescription
+	USING (drug_name)
+	INNER JOIN applicable_npis
+	USING (npi)
+	WHERE opioid_drug_flag = 'Y'
+	GROUP BY county, population
+	ORDER BY proportion_opioid_prescriptions DESC
+),
+deaths_query AS (
+	SELECT
+		county,
+		year,
+		ROUND(overdose_deaths/population * 1000.0, 2) AS odds_per_1000
+	FROM overdose_deaths
+	INNER JOIN fips_county
+	USING (fipscounty)
+	INNER JOIN population
+	USING (fipscounty)
+	WHERE state = 'TN'
+)
+
+SELECT 
+	county, 
+	year, 
+	odds_per_1000, 
+	proportion_opioid_prescriptions
+FROM proportional_query
+INNER JOIN deaths_query
+USING (county);
+
+--Question 5 Query
+
+WITH deaths_query AS (
+	SELECT
+		county,
+		year,
+		ROUND(overdose_deaths/population * 1000.0, 2) AS odds_per_1000
+	FROM overdose_deaths
+	INNER JOIN fips_county
+	USING (fipscounty)
+	INNER JOIN population
+	USING (fipscounty)
+	WHERE state = 'TN'
+),
+renamed_drugs AS (
+	SELECT 
+		drug_name,
+		generic_name,
+		CASE WHEN generic_name ILIKE '%CODEINE%' THEN 'codeine'
+		WHEN generic_name ILIKE '%FENTANYL%' THEN 'fentanyl'
+		WHEN generic_name ILIKE '%HYDROCODONE%' THEN 'hydrocodone'
+		WHEN generic_name ILIKE '%MORPHINE%' THEN 'morphine'
+		WHEN generic_name ILIKE '%OXYCODONE%' THEN 'oxycodone'
+		WHEN generic_name ILIKE '%OXYMORPHONE%' THEN 'oxymorphone'
+		END AS generic_type
+	FROM drug
+),
+drug_counts AS (
+	SELECT
+		npi,
+		generic_type, 
+		SUM(total_claim_count) AS drug_tcc
+	FROM prescription
+	INNER JOIN renamed_drugs
+	USING (drug_name)
+	WHERE generic_type IS NOT NULL
+	GROUP BY npi, generic_type
+),
+correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+),
+proportional_query AS (
+	SELECT 
+		generic_type,
+		county, 
+		ROUND(SUM(drug_tcc)/population, 2) AS proportion_prescriptions
+	FROM drug_counts
+	INNER JOIN applicable_npis
+	USING (npi)
+	GROUP BY county, population, generic_type
+	ORDER BY county, generic_type
+)
+
+SELECT 
+	INITCAP(county) AS county, 
+	year, 
+	generic_type,
+	odds_per_1000, 
+	proportion_prescriptions
+FROM proportional_query
+INNER JOIN deaths_query
+USING (county)
+ORDER BY county, generic_type, year;
 

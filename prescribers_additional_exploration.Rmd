@@ -1,0 +1,343 @@
+---
+title: "Additional Exploration for Prescribers"
+output: html_notebook
+---
+
+### Tennessee's Opioid Crisis
+
+Opioids are a class of drugs including prescription pain relievers such as oxycodone and hydrocodone, the synthetic opioid fentanyl, and the illegal drug heroin. These drugs produce euphoria in addition to pain relief, which can lead to dependence, addiction, overdose, and death. 
+
+In the late 1990s, opioids began to be prescribed at high rates, which led to widespread misuse and ultimately created a serious national health crisis. In 2019, more than 130 people per day died from opioid-related drug overdoses in the United States. Tennessee has been one of the hardest-hit states in the opioid epidemic, with more than 1300 overdose deaths in 2018.
+
+In this project, you will be working with a database created from the 2017 Medicare Part D Prescriber Public Use File, available at https://www.cms.gov/Research-Statistics-Data-and-Systems/Statistics-Trends-and-Reports/Medicare-Provider-Charge-Data/PartD2017. 
+
+Your objectives are to use the database provided to attempt to answer the following questions:
+
+```{r, echo = FALSE, warrnings = FALSE}
+library(DBI)
+library(RPostgres)
+library(tidyverse)
+library(knitr)
+
+con <- dbConnect(Postgres(),                 
+                 dbname = 'prescribers',
+                 host = 'localhost',
+                 port = 5432, 
+                 user = 'postgres',
+                 password = rstudioapi::askForPassword("Database Password: "))
+```
+
+* Which Tennessee counties had a disproportionately high number of opioid prescriptions? **Scott, Clay, Washington, etc.** 
+
+```{r, echo = FALSE, warrnings = FALSE}
+query = "
+WITH correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+)
+
+SELECT county, ROUND(SUM(total_claim_count)/population, 2) AS proportion_opioid_prescriptions
+FROM drug
+RIGHT JOIN prescription
+USING (drug_name)
+INNER JOIN applicable_npis
+USING (npi)
+WHERE opioid_drug_flag = 'Y'
+GROUP BY county, population
+ORDER BY proportion_opioid_prescriptions DESC;
+"
+res <- dbSendQuery(con, query)
+proportion_opioid_prescriptions <- dbFetch(res)
+
+proportion_opioid_prescriptions %>% 
+  slice(1:10) %>% 
+  ggplot(aes(reorder(str_to_title(county), 
+                     proportion_opioid_prescriptions), 
+             proportion_opioid_prescriptions,
+             fill = county)) +
+           geom_bar(stat = 'identity') +
+  coord_flip() +
+  labs(title = "Top 10 TN Counties by Proportion of Opioid Prescriptions",
+       x = "Proportion of Opioid Prescriptions by Population",
+       y = "County") +
+  theme(legend.position = "None")
+```
+* Who are the top opioid prescribers for the state of Tennessee?
+**Coffey, Kindrick, Cathers, Painter, Clark.**
+
+```{r, echo = FALSE, warrnings = FALSE}
+query = "
+SELECT 
+	INITCAP(nppes_provider_first_name) AS first_name,
+	COALESCE(nppes_provider_mi,'') AS mi,
+	INITCAP(nppes_provider_last_org_name) AS last_name, 
+	COALESCE(nppes_credentials,'') AS credentials,
+	SUM(total_claim_count) AS total_prescriptions
+FROM drug
+INNER JOIN prescription
+USING (drug_name)
+INNER JOIN prescriber
+USING (npi)
+WHERE opioid_drug_flag = 'Y'
+AND nppes_provider_state = 'TN'
+GROUP BY
+	nppes_provider_first_name,
+	nppes_provider_mi,
+	nppes_provider_last_org_name, 
+	nppes_credentials
+ORDER BY total_prescriptions DESC;
+"
+res = dbSendQuery(con, query)
+prescriptions_by_tn_providers <- dbFetch(res) %>% 
+  as_tibble() %>%
+  mutate(credentials = paste0(", ", str_remove_all(credentials, "\\.")),
+         mi = if_else(mi == '', mi, paste0(mi,".")),
+         provider_name = str_c(str_c(first_name, mi, last_name, sep = ' '), credentials)) %>%
+  select(provider_name, total_prescriptions) %>% 
+  mutate(provider_name = str_replace_all(provider_name, "  ", " "))
+
+
+prescriptions_by_tn_providers %>% 
+  slice(1:10) %>% 
+  ggplot(aes(reorder(provider_name, 
+                     total_prescriptions), 
+             total_prescriptions,
+             fill = provider_name)) +
+           geom_bar(stat = 'identity') +
+  coord_flip() +
+  labs(title = "Top 10 Opioid Prescribers in TN",
+       x = "Number of Opioid Prescriptions",
+       y = "Prescriber") +
+  theme(legend.position = "None")
+
+
+```
+
+* What did the trend in overdose deaths due to opioids look like in Tennessee from 2015 to 2018?
+**Mild increase during that time from 1,000 to 1,300.**
+
+```{r, echo = FALSE, warrnings = FALSE}
+query = "
+SELECT year, sum(overdose_deaths) AS deaths
+FROM overdose_deaths
+WHERE year BETWEEN 2015 AND 2018
+GROUP BY year
+ORDER BY year;
+"
+
+res <- dbSendQuery(con, query)
+deaths <- dbFetch(res)
+
+deaths %>% 
+  ggplot(aes(year, deaths)) +
+  geom_line() +
+  ylim(0,1500) +
+  labs(title = "Deaths Due to Opioid Overdoses in TN (2015-2018)",
+       x = "Year",
+       y = "Number of Deaths")
+
+```
+
+* Is there an association between rates of opioid prescriptions and overdose deaths by county? **Almost none. Correlation is nearly 0.**
+
+```{r, echo = FALSE, warrnings = FALSE}
+query = "
+WITH correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+),
+proportional_query AS (
+	SELECT 
+		county, 
+		ROUND(SUM(total_claim_count)/population, 2) AS proportion_opioid_prescriptions
+	FROM drug
+	RIGHT JOIN prescription
+	USING (drug_name)
+	INNER JOIN applicable_npis
+	USING (npi)
+	WHERE opioid_drug_flag = 'Y'
+	GROUP BY county, population
+	ORDER BY proportion_opioid_prescriptions DESC
+),
+deaths_query AS (
+	SELECT
+		county,
+		year,
+		ROUND(overdose_deaths/population * 1000.0, 2) AS odds_per_1000
+	FROM overdose_deaths
+	INNER JOIN fips_county
+	USING (fipscounty)
+	INNER JOIN population
+	USING (fipscounty)
+	WHERE state = 'TN'
+)
+
+SELECT 
+	county, 
+	year, 
+	odds_per_1000, 
+	proportion_opioid_prescriptions
+FROM proportional_query
+INNER JOIN deaths_query
+USING (county);
+"
+res <- dbSendQuery(con, query)
+odds_vs_pns <- dbFetch(res)
+
+odds_vs_pns %>% 
+  filter(year == 2017) %>% 
+  ggplot(aes(proportion_opioid_prescriptions, 
+             odds_per_1000)) +
+  geom_point(size = 2) +
+  scale_x_continuous(limits = c(0,1.2),
+                     breaks = seq(0,1.2,0.2)) +
+  scale_y_continuous(limits = c(0,1.2),
+                     breaks = seq(0,1.2,0.2)) +
+  labs(x = "Opioid Prescriptions Per Capita",
+       y = "Overdose Deaths Per 1,000",
+       title = "Overdose Deaths vs. Opioid Prescriptions in TN")
+
+# odds_vs_pns %>% 
+#   filter(year == 2017) %>% 
+#   select(proportion_opioid_prescriptions, odds_per_1000) %>% 
+#   cor() %>% 
+#   .[1,2]
+```
+* Is there any association between a particular type of opioid and number of overdose deaths?
+**Not really. Hydrocodone and Oxycodone are the closest contenders, but they do not correlate with overdose deaths at the county level.**
+
+```{r, echo = FALSE, warrnings = FALSE}
+query = "
+WITH deaths_query AS (
+	SELECT
+		county,
+		year,
+		ROUND(overdose_deaths/population * 1000.0, 2) AS odds_per_1000
+	FROM overdose_deaths
+	INNER JOIN fips_county
+	USING (fipscounty)
+	INNER JOIN population
+	USING (fipscounty)
+	WHERE state = 'TN'
+),
+renamed_drugs AS (
+	SELECT 
+		drug_name,
+		generic_name,
+		CASE WHEN generic_name ILIKE '%CODEINE%' THEN 'codeine'
+		WHEN generic_name ILIKE '%FENTANYL%' THEN 'fentanyl'
+		WHEN generic_name ILIKE '%HYDROCODONE%' THEN 'hydrocodone'
+		WHEN generic_name ILIKE '%MORPHINE%' THEN 'morphine'
+		WHEN generic_name ILIKE '%OXYCODONE%' THEN 'oxycodone'
+		WHEN generic_name ILIKE '%OXYMORPHONE%' THEN 'oxymorphone'
+		END AS generic_type
+	FROM drug
+),
+drug_counts AS (
+	SELECT
+		npi,
+		generic_type, 
+		SUM(total_claim_count) AS drug_tcc
+	FROM prescription
+	INNER JOIN renamed_drugs
+	USING (drug_name)
+	WHERE generic_type IS NOT NULL
+	GROUP BY npi, generic_type
+),
+correct_counties AS (
+	SELECT 
+		zip,
+		fipscounty
+	FROM zip_fips
+	WHERE tot_ratio IN (
+			SELECT MAX(tot_ratio) OVER(PARTITION BY zip) AS max_tot
+			FROM zip_fips)
+),
+applicable_npis AS (
+	SELECT npi, county, population
+	FROM prescriber
+	INNER JOIN correct_counties
+	ON nppes_provider_zip5 = zip
+	INNER JOIN population
+	USING (fipscounty)
+	INNER JOIN fips_county
+	USING(fipscounty)
+	WHERE nppes_provider_state = 'TN'
+),
+proportional_query AS (
+	SELECT 
+		generic_type,
+		county, 
+		ROUND(SUM(drug_tcc)/population, 2) AS proportion_prescriptions
+	FROM drug_counts
+	INNER JOIN applicable_npis
+	USING (npi)
+	GROUP BY county, population, generic_type
+	ORDER BY county, generic_type
+)
+
+SELECT 
+	INITCAP(county) AS county, 
+	year, 
+	generic_type,
+	odds_per_1000, 
+	proportion_prescriptions
+FROM proportional_query
+INNER JOIN deaths_query
+USING (county)
+ORDER BY county, generic_type, year;
+"
+
+res <- dbSendQuery(con, query)
+odds_vs_types <- dbFetch(res)
+
+odds_vs_types %>% 
+  filter(year == 2017,
+         generic_type == 'oxycodone' |
+           generic_type == 'hydrocodone') %>% 
+  ggplot(aes(proportion_prescriptions, 
+             odds_per_1000,
+             color = generic_type)) +
+  geom_point(size = 2) + 
+  scale_color_discrete(name = 'Type of Drug') +
+  labs(Title = 'Correlation Between Hydrocodone and Oxycodone and Overdose Deaths',
+       x = 'Scripts Per Capita',
+       y = 'Overdose Deaths Per 1,000')
+
+```
+
+Note that some zip codes will be associated with multiple fipscounty values in the zip_fips table. To resolve this, use the fipscounty with the highest tot_ratio for each zipcode.
+
+Use Python or R to do your analysis on these questions. 
